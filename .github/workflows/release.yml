@@ -1,0 +1,30 @@
+name: release
+
+# The three steps a release takes: tag the version, move the major tag people
+# actually write, and publish the release. Only the first is done by hand.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # archdochq/export@v1 is the form the README gives, so a release that
+      # does not move the major tag reaches nobody.
+      - name: Move the major tag
+        run: |
+          set -euo pipefail
+          major="${GITHUB_REF_NAME%%.*}"
+          git tag -f "$major"
+          git push -f origin "refs/tags/$major"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes

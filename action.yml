@@ -1,0 +1,202 @@
+name: ArchDoc export
+description: Export a specification repository as JSON, with the revision recorded.
+author: ArchDoc
+
+branding:
+  icon: download
+  color: blue
+
+inputs:
+  version:
+    description: >
+      The archdoc release to use. Left empty, whatever archdoc is already on
+      PATH is used, and the latest release is installed only if there is none,
+      so a workflow that built the binary itself keeps the one it built. Given
+      a value, that release is installed whatever is already there.
+    required: false
+    default: ''
+  path:
+    description: The directory to run in, as archdoc -C takes it.
+    required: false
+    default: '.'
+  file:
+    description: >
+      Where to write the single-document export, relative to the workspace.
+      Ignored when out is set.
+    required: false
+    default: spec.json
+  out:
+    description: >
+      A directory to write a tree into instead of one document: index.json
+      without bodies, one file per document beside it, and glossary.json when
+      there is a glossary.
+    required: false
+    default: ''
+  commit:
+    description: >
+      The revision the export describes, recorded as written. Defaults to the
+      commit the run is for. Empty records none, which is what a committed
+      export tree wants: the field would otherwise change on every run and the
+      output would no longer be worth diffing.
+    required: false
+    default: ${{ github.sha }}
+  source:
+    description: >
+      Include each document's file as it is on disk, front matter included.
+    required: false
+    default: 'false'
+  no-bodies:
+    description: >
+      Omit every contents body, keeping the outline.
+    required: false
+    default: 'false'
+  publish-token:
+    description: >
+      Publish the export to archdoc.dev, as a bearer token. Empty publishes
+      nothing. Put the secret on a GitHub Environment limited to the branch
+      that is allowed to publish, because the endpoint does not restrict one.
+    required: false
+    default: ''
+  publish-url:
+    description: The endpoint to publish to.
+    required: false
+    default: https://archdoc.dev/api/publish
+
+outputs:
+  file:
+    description: >
+      The single-document export that was written. Empty when out was set.
+    value: ${{ steps.export.outputs.file }}
+  directory:
+    description: The tree that was written. Empty unless out was set.
+    value: ${{ steps.export.outputs.directory }}
+  documents:
+    description: How many documents the export carries.
+    value: ${{ steps.export.outputs.documents }}
+  snapshot:
+    description: >
+      The snapshot the endpoint accepted. Empty unless publish-token was
+      given.
+    value: ${{ steps.publish.outputs.snapshot }}
+
+runs:
+  using: composite
+  steps:
+    - id: decide
+      shell: bash
+      env:
+        REQUESTED: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        # An explicit version is always honoured, so a request is never
+        # silently ignored. With none, an archdoc already on PATH is left
+        # alone: ArchDoc's own repository builds the binary from the commit
+        # under test and must not have a release laid over it.
+        if [ -n "$REQUESTED" ]; then
+          echo "install=true" >> "$GITHUB_OUTPUT"
+        elif command -v archdoc > /dev/null 2>&1; then
+          echo "install=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "install=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - if: steps.decide.outputs.install == 'true'
+      uses: archdochq/setup@v1
+      with:
+        version: ${{ inputs.version || 'latest' }}
+
+    - id: export
+      shell: bash
+      env:
+        ARCHDOC_PATH: ${{ inputs.path }}
+        FILE: ${{ inputs.file }}
+        OUT: ${{ inputs.out }}
+        COMMIT: ${{ inputs.commit }}
+        SOURCE: ${{ inputs.source }}
+        NO_BODIES: ${{ inputs.no-bodies }}
+        # The token itself is not wanted here, only whether there is one.
+        PUBLISHING: ${{ inputs.publish-token != '' }}
+      run: |
+        set -euo pipefail
+
+        # What gets published is the single document, so the tree form has
+        # nothing to send. Refused here rather than in the publish step, which
+        # would have run the export first and failed on an empty path.
+        if [ -n "$OUT" ] && [ "$PUBLISHING" = "true" ]; then
+          echo "::error::publishing sends the single document, so out cannot be set"
+          exit 1
+        fi
+
+        # Built as an array, and never left empty: macOS runners still carry
+        # bash 3.2, where expanding an empty array under set -u is an error.
+        # Each flag gets an if rather than [ ... ] && ..., which returns
+        # non-zero when the test fails and would end the step under set -e.
+        command=(archdoc -C "$ARCHDOC_PATH" export)
+        if [ "$SOURCE" = "true" ]; then
+          command+=(--source)
+        fi
+        if [ "$NO_BODIES" = "true" ]; then
+          command+=(--no-bodies)
+        fi
+        if [ -n "$COMMIT" ]; then
+          command+=(--commit "$COMMIT")
+        fi
+
+        if [ -n "$OUT" ]; then
+          # Absolute, because archdoc resolves --out after -C has taken
+          # effect: a relative dist with a path of spec would be written to
+          # spec/dist, while file, being a redirect in this shell, would not.
+          # Both inputs are relative to the workspace.
+          mkdir -p "$OUT"
+          out="$(cd "$OUT" && pwd)"
+          "${command[@]}" --out "$out"
+          index="$OUT/index.json"
+          echo "directory=$OUT" >> "$GITHUB_OUTPUT"
+          echo "file=" >> "$GITHUB_OUTPUT"
+        else
+          file="${FILE:-spec.json}"
+          mkdir -p "$(dirname "$file")"
+          "${command[@]}" > "$file"
+          index="$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "directory=" >> "$GITHUB_OUTPUT"
+        fi
+
+        # From index.json in either form: it is the one file that lists every
+        # document whichever way the export was written.
+        documents="$(jq '.documents | length' "$index")"
+        echo "documents=$documents" >> "$GITHUB_OUTPUT"
+        echo "$documents document(s) exported" >> "$GITHUB_STEP_SUMMARY"
+
+    - id: publish
+      if: inputs.publish-token != ''
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.publish-token }}
+        URL: ${{ inputs.publish-url }}
+        FILE: ${{ steps.export.outputs.file }}
+      run: |
+        set -euo pipefail
+
+        # The token goes in through a config file on stdin rather than -H,
+        # which would leave it in curl's argv for anything else running in the
+        # job to read. The body comes from a file, so stdin is free.
+        #
+        # --fail-with-body rather than -f: the endpoint's own message is what
+        # tells a rejected token from a typed URL, and -f discards it.
+        config="$(printf 'header = "Authorization: Bearer %s"' "$TOKEN")"
+        if ! response="$(curl -sS --fail-with-body -K - \
+          -X POST "$URL" \
+          -H "Content-Type: application/json" \
+          --data-binary "@$FILE" <<< "$config")"; then
+          echo "$response"
+          echo "::error::publishing to $URL failed"
+          exit 1
+        fi
+
+        # The response is a 202 and says nothing about whether the snapshot
+        # ingested: that is known only once the job behind it has read the
+        # file. All there is to report is the id it was given.
+        snapshot="$(jq -r '.snapshot // .id // empty' <<< "$response")"
+        echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
+        echo "Published as snapshot $snapshot" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,197 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A superseded run tells you nothing.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Linux only. The platform work belongs to archdochq/setup, which carries a
+  # matrix for it; repeating that here would test the same download twice.
+  document:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: export
+        uses: ./
+        with:
+          path: fixtures
+
+      - name: It wrote spec.json, and the export describes this run's commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          file='${{ steps.export.outputs.file }}'
+          echo "file=$file documents=${{ steps.export.outputs.documents }}"
+          [ "$file" = "spec.json" ]
+          [ -s "$file" ]
+          [ "$(jq -r '.schema' "$file")" = "2" ]
+          [ "$(jq -r '.config.name' "$file")" = "Fixture" ]
+          # The default this action exists for. An unresolved context in the
+          # action's input default would arrive here as its own text rather
+          # than a revision, and this is what catches it.
+          [ "$(jq -r '.commit' "$file")" = "$GITHUB_SHA" ]
+          # -gt rather than != 0, which an unset output satisfies.
+          documents='${{ steps.export.outputs.documents }}'
+          [ -n "$documents" ] && [ "$documents" -gt 0 ]
+
+  # Empty means none, which is what a committed export tree needs, and
+  # --no-bodies and a path of its own have to survive the wrapping.
+  options:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: export
+        uses: ./
+        with:
+          path: fixtures
+          file: build/outline.json
+          commit: ''
+          no-bodies: true
+
+      - name: No commit, no bodies, and it went where it was told
+        shell: bash
+        run: |
+          set -euo pipefail
+          file='${{ steps.export.outputs.file }}'
+          [ "$file" = "build/outline.json" ]
+          [ -s "$file" ]
+          [ "$(jq -r '.commit // "absent"' "$file")" = "absent" ]
+          bodies='[.documents[].contents[] | select(has("body"))] | length'
+          [ "$(jq "$bodies" "$file")" = "0" ]
+          [ -z '${{ steps.export.outputs.directory }}' ]
+
+  # The other half of the command: a tree rather than one document.
+  tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: export
+        uses: ./
+        with:
+          path: fixtures
+          out: dist
+
+      - name: An index without bodies, and a file per document beside it
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory='${{ steps.export.outputs.directory }}'
+          [ "$directory" = "dist" ]
+          [ -z '${{ steps.export.outputs.file }}' ]
+          [ -s "$directory/index.json" ]
+          [ -s "$directory/spec/glossary.json" ]
+          bodies='[.documents[].contents[] | select(has("body"))] | length'
+          [ "$(jq "$bodies" "$directory/index.json")" = "0" ]
+          [ "$(jq '.contents | length' "$directory/spec/glossary.json")" -gt 0 ]
+
+  # A version asked for is installed whatever is already there, and an archdoc
+  # already present is left alone. Both halves, because either one passing
+  # alone proves nothing about the other.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: archdochq/setup@v1
+        with:
+          version: v0.4.0
+      - name: An explicit version replaces what is there
+        uses: ./
+        with:
+          path: fixtures
+          version: v0.3.0
+      - shell: bash
+        run: |
+          set -euo pipefail
+          archdoc --version
+          [ "$(archdoc --version)" = "v0.3.0" ]
+
+      - name: And with none, what is there is kept
+        uses: ./
+        with:
+          path: fixtures
+      - shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(archdoc --version)" = "v0.3.0" ]
+
+  # No endpoint exists to publish to yet, so the assertions are made against a
+  # stub: what the action sends is the part this repository is responsible for.
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: A stub endpoint that records what it was sent
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > stub.py <<'PY'
+          import http.server, json, pathlib
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  length = int(self.headers["Content-Length"])
+                  pathlib.Path("received.json").write_bytes(self.rfile.read(length))
+                  pathlib.Path("headers.json").write_text(json.dumps(dict(self.headers)))
+                  self.send_response(202)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(b'{"snapshot": "01941f3e-stub"}')
+
+              def log_message(self, *args):
+                  pass
+
+          http.server.HTTPServer(("127.0.0.1", 8099), Handler).serve_forever()
+          PY
+          python3 stub.py &
+          for _ in $(seq 1 25); do
+            curl -s -o /dev/null "http://127.0.0.1:8099" && break
+            sleep 0.2
+          done
+
+      - id: export
+        uses: ./
+        with:
+          path: fixtures
+          source: true
+          publish-token: archdoc_pub_stub
+          publish-url: http://127.0.0.1:8099/api/publish
+
+      - name: It sent the export it wrote, with the token and the content type
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "${{ steps.export.outputs.snapshot }}" = "01941f3e-stub" ]
+          [ "$(jq -r '.Authorization' headers.json)" = "Bearer archdoc_pub_stub" ]
+          [ "$(jq -r '."Content-Type"' headers.json)" = "application/json" ]
+          # Byte for byte what the export step wrote, not a re-run of it.
+          cmp received.json spec.json
+          [ "$(jq -r '.documents[0] | has("source")' received.json)" = "true" ]
+
+      # The tree has no single document to send, and finding that out after
+      # the export has run is finding it out too late.
+      - id: both
+        uses: ./
+        continue-on-error: true
+        with:
+          path: fixtures
+          out: dist
+          publish-token: archdoc_pub_stub
+          publish-url: http://127.0.0.1:8099/api/publish
+      - shell: bash
+        run: |
+          set -euo pipefail
+          [ "${{ steps.both.outcome }}" = "failure" ]
+          [ ! -d dist ]
