@@ -47,7 +47,15 @@ inputs:
     default: 'false'
   no-bodies:
     description: >
-      Omit every contents body, keeping the outline.
+      Omit every body, of contents entries, questions, answers, Changelog
+      entries and rejection rationale sections, keeping the outline.
+    required: false
+    default: 'false'
+  all-headings:
+    description: >
+      Keep the question sections, the Changelog and the Rejection rationale in
+      contents, as well as publishing them as structured data. Needs archdoc
+      v0.6.0 or later.
     required: false
     default: 'false'
   publish-token:
@@ -114,6 +122,7 @@ runs:
         COMMIT: ${{ inputs.commit }}
         SOURCE: ${{ inputs.source }}
         NO_BODIES: ${{ inputs.no-bodies }}
+        ALL_HEADINGS: ${{ inputs.all-headings }}
         # The token itself is not wanted here, only whether there is one.
         PUBLISHING: ${{ inputs.publish-token != '' }}
       run: |
@@ -137,6 +146,9 @@ runs:
         fi
         if [ "$NO_BODIES" = "true" ]; then
           command+=(--no-bodies)
+        fi
+        if [ "$ALL_HEADINGS" = "true" ]; then
+          command+=(--all-headings)
         fi
         if [ -n "$COMMIT" ]; then
           command+=(--commit "$COMMIT")

@@ -102,7 +102,8 @@ rather than a `-H` argument, so it is not in any process's arguments.
 | `out` | *(empty)* | A directory to write a tree into instead, ignoring `file` |
 | `commit` | `${{ github.sha }}` | The revision the export describes. Empty records none |
 | `source` | `false` | Include each document's file as it is on disk |
-| `no-bodies` | `false` | Omit every contents body, keeping the outline |
+| `no-bodies` | `false` | Omit every body, of contents entries, questions, answers, Changelog entries and rejection rationale sections, keeping the outline |
+| `all-headings` | `false` | Keep the question sections, the Changelog and the Rejection rationale in `contents`. Needs archdoc v0.6.0 or later |
 | `publish-token` | *(empty)* | Publish to archdoc.dev, as a bearer token |
 | `publish-url` | `https://archdoc.dev/api/publish` | The endpoint to publish to |
 
