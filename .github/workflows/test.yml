@@ -33,7 +33,7 @@ jobs:
           echo "file=$file documents=${{ steps.export.outputs.documents }}"
           [ "$file" = "spec.json" ]
           [ -s "$file" ]
-          [ "$(jq -r '.schema' "$file")" = "2" ]
+          [ "$(jq -r '.schema' "$file")" = "3" ]
           [ "$(jq -r '.config.name' "$file")" = "Fixture" ]
           # The default this action exists for. An unresolved context in the
           # action's input default would arrive here as its own text rather
@@ -69,6 +69,37 @@ jobs:
           bodies='[.documents[].contents[] | select(has("body"))] | length'
           [ "$(jq "$bodies" "$file")" = "0" ]
           [ -z '${{ steps.export.outputs.directory }}' ]
+
+  # The Changelog is published as data either way, and kept in contents only
+  # where all-headings asks for it.
+  all-headings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: plain
+        uses: ./
+        with:
+          path: fixtures
+          version: v0.6.0
+          file: plain.json
+
+      - id: all
+        uses: ./
+        with:
+          path: fixtures
+          version: v0.6.0
+          file: all.json
+          all-headings: true
+
+      - name: Only all-headings keeps the Changelog in contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          held='[.documents[] | select(.id == "RFC-0001") | .contents[] | select(.anchor == "changelog")] | length'
+          [ "$(jq "$held" plain.json)" = "0" ]
+          [ "$(jq "$held" all.json)" = "1" ]
+          [ "$(jq '[.documents[] | select(.id == "RFC-0001") | .changelog[]] | length' plain.json)" = "1" ]
 
   # The other half of the command: a tree rather than one document.
   tree:
